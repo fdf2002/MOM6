@@ -54,6 +54,7 @@ use MOM_oda_incupd,          only : apply_oda_incupd, oda_incupd_CS
 use MOM_opacity,             only : opacity_init, opacity_end, opacity_CS
 use MOM_opacity,             only : absorbRemainingSW, optics_type, optics_nbands
 use MOM_open_boundary,       only : ocean_OBC_type
+use MOM_otec,                only : interior_mass_sink, otec_init, otec_CS
 use MOM_regularize_layers,   only : regularize_layers, regularize_layers_init, regularize_layers_CS
 use MOM_set_diffusivity,     only : set_diffusivity, set_BBL_TKE
 use MOM_set_diffusivity,     only : set_diffusivity_init, set_diffusivity_end
@@ -116,6 +117,7 @@ type, public :: diabatic_CS ; private
   logical :: use_oda_incupd          !< If True, DA incremental update is
                                      !! applied everywhere
   logical :: use_geothermal          !< If true, apply geothermal heating.
+  logical :: use_otec                !< If true, apply OTEC.
   logical :: use_int_tides           !< If true, use the code that advances a separate set
                                      !! of equations for the internal tide energy density.
   logical :: ePBL_is_additive        !< If true, the diffusivity from ePBL is added to all
@@ -236,6 +238,7 @@ type, public :: diabatic_CS ; private
   type(energetic_PBL_CS) :: ePBL                    !< Energetic PBL control struct
   type(entrain_diffusive_CS) :: entrain_diffusive   !< Diffusive entrainment control struct
   type(geothermal_CS) :: geothermal                 !< Geothermal control struct
+  type(otec_CS) :: otec                             !< OTEC control struct
   type(int_tide_CS) :: int_tide                     !< Internal tide control struct
   type(opacity_CS) :: opacity                       !< Opacity control struct
   type(regularize_layers_CS) :: regularize_layers   !< Regularize layer control struct
@@ -3402,6 +3405,9 @@ subroutine diabatic_driver_init(Time, G, GV, US, param_file, useALEalgorithm, di
   ! initialize the geothermal heating module
   if (CS%use_geothermal) &
     call geothermal_init(Time, G, GV, US, param_file, diag, CS%geothermal, useALEalgorithm)
+
+  ! initialize the OTEC module
+  call otec_init(Time, G, GV, US, param_file, diag, CS%otec)
 
   ! initialize module for internal tide induced mixing
   if (CS%use_int_tides) then
