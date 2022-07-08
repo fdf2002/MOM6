@@ -24,7 +24,7 @@ public interior_mass_sink, otec_init
 !> Control structure for OTEC
 type, public :: otec_CS ; private
   logical :: initialized = .false. !< True if this control structure has been initialized.
-  real :: w_otec !< Pumping rate [Z T-1 ~> m s-1]
+  real    :: w_otec !< Pumping rate [Z T-1 ~> m s-1]
   logical :: apply_otec !< If true, OTEC will be applied.
 
   type(time_type), pointer :: Time => NULL() !< A pointer to the ocean model's clock
@@ -44,7 +44,7 @@ subroutine interior_mass_sink(h, tv, dt, G, GV, US, CS, halo)
                                                                  !! to any available thermodynamic fields.
   real,                                      intent(in)    :: dt !< Time increment [T ~> s].
   type(unit_scale_type),                     intent(in)    :: US !< A dimensional unit scaling type
-  type(otec_CS),                       intent(in)    :: CS !< The control structure returned by
+  type(otec_CS),                             intent(in)    :: CS !< The control structure returned by
                                                            !! a previous call to
                                                            !! otec_init.
   integer,                         optional, intent(in)    :: halo !< Halo width over which to work
@@ -60,12 +60,17 @@ subroutine interior_mass_sink(h, tv, dt, G, GV, US, CS, halo)
 
   if (.not. CS%initialized) call MOM_error(FATAL, "MOM_otec: "//&
          "Module must be initialized before it is used.")
+  
   if (.not.CS%apply_otec) return
 
-  do j=js,je
-    do i=isj,iej
-        ! Remove mass from layer k at a rate set by w_otec
+  ! Fixed value of k (for now) !
+  ! THIS WILL NOT STAY         !
+  k = 2
 
+  do j=js,je
+    do i=is,ie
+      ! Remove mass from layer k at a rate set by w_otec
+      h(i, j, k) = h(i, j, k) - CS%w_otec * dt
     enddo ! i-loop
   enddo ! j-loop
 

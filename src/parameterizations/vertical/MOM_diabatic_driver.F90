@@ -586,6 +586,10 @@ subroutine diabatic_ALE_legacy(u, v, h, tv, Hml, fluxes, visc, ADp, CDp, dt, Tim
     if (CS%debugConservation) call MOM_state_stats('geothermal', u, v, h, tv%T, tv%S, G, GV, US)
   endif
 
+  if (CS%use_otec) then
+    call interior_mass_sink(h, tv, dt, G, GV, US, CS%otec, halo=CS%halo_TS_diff)
+  endif
+
   ! Whenever thickness changes let the diag manager know, target grids
   ! for vertical remapping may need to be regenerated.
   call diag_update_remap_grids(CS%diag)
@@ -1169,6 +1173,8 @@ subroutine diabatic_ALE(u, v, h, tv, Hml, fluxes, visc, ADp, CDp, dt, Time_end, 
     if (CS%debugConservation) call MOM_state_stats('geothermal', u, v, h, tv%T, tv%S, G, GV, US)
   endif
 
+  
+
   ! Whenever thickness changes let the diag manager know, target grids
   ! for vertical remapping may need to be regenerated.
   call diag_update_remap_grids(CS%diag)
@@ -1714,6 +1720,9 @@ subroutine layered_diabatic(u, v, h, tv, Hml, fluxes, visc, ADp, CDp, dt, Time_e
     if (showCallTree) call callTree_waypoint("geothermal (diabatic)")
     if (CS%debugConservation) call MOM_state_stats('geothermal', u, v, h, tv%T, tv%S, G, GV, US)
   endif
+
+  ! OTEC !
+  ! if (CS%use_otec) call interior_mass_sink(h, tv, dt, G, GV, US, CS%otec, halo=CS%halo_TS_diff)
 
   ! Whenever thickness changes let the diag manager know, target grids
   ! for vertical remapping may need to be regenerated.
@@ -3408,6 +3417,7 @@ subroutine diabatic_driver_init(Time, G, GV, US, param_file, useALEalgorithm, di
 
   ! initialize the OTEC module
   call otec_init(Time, G, GV, US, param_file, diag, CS%otec)
+  CS%use_otec = .true.
 
   ! initialize module for internal tide induced mixing
   if (CS%use_int_tides) then
