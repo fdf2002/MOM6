@@ -58,35 +58,30 @@ subroutine mass_sink(h1d, tv, GV, sink_depth, dThickness, netMassOut, netSaltOut
   real, optional,            intent(out)   :: netHeatOut !< The total heat being extracted
                                                          !! [degC H ~> degC m or degC kg m-2].
 
-  integer :: k = 0
-  real    :: layer_depth = 0.0 ! Bottom of the current layer
+  integer :: k
+  real    :: layer_depth ! Bottom of the current layer
   real    :: dh, maximum_drainage
+
+  k = GV%ke + 1
+  layer_depth = 0.0
 
   print *, "there are", GV%ke, "layers. sink_depth=", sink_depth, ". layer_depth=", layer_depth
 
   ! Iterate to find the appropriate layer to drain from
   do while (layer_depth <= sink_depth)
-    k = k + 1
+    k = k - 1
     print *, "Layer", k, "of", GV%ke
-    if (k > GV%ke) then ! ocean is not deep enough
-      !call MOM_error(NOTE, "MOM_otec: Ocean floor reached during intake.")
+    if (k < 1) then ! ocean is not deep enough
+      call MOM_error(WARNING, "MOM_otec: Ocean floor reached before intake.")
       return
     endif
     layer_depth = layer_depth + h1d(k)
-    print *, "Checking next layer"
+    !print *, "Checking next layer"
   enddo
 
   !print *, "Layer found."
 
   do while (dThickness < 0) ! as long as there is still more to take out
-
-    print *, "Extracting"
-
-    ! If ocean bottom is reached
-    if (k > GV%ke) then
-      call MOM_error(NOTE, "MOM_otec: Ocean floor reached during intake.")
-      return
-    endif
 
     ! The maximum drainage from this layer is everything below sink_depth.
     ! Ensure the layer thickness is always at least Angstrom.
@@ -98,7 +93,14 @@ subroutine mass_sink(h1d, tv, GV, sink_depth, dThickness, netMassOut, netSaltOut
     layer_depth = layer_depth - dh ! Layer bottom has moved up
 
     ! Increment for the next iteration
-    k = k + 1
+    k = k - 1
+
+    ! If ocean bottom is reached
+    if (k < 1) then
+      call MOM_error(WARNING, "MOM_otec: Ocean floor reached during intake.")
+      return
+    endif
+
     layer_depth = layer_depth + h1d(k)
 
   enddo
@@ -149,6 +151,7 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
       ! Copy this column into a 1D array (for runtime efficiency)
       do k=1,GV%ke
         h1d(k) = h(i,j,k)
+        print *, "thickness of layer", k, "=", h1d(k)
       enddo
 
       ! Remove warm water from the surface layer
