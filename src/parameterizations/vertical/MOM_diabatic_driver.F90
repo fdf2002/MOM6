@@ -54,7 +54,7 @@ use MOM_oda_incupd,          only : apply_oda_incupd, oda_incupd_CS
 use MOM_opacity,             only : opacity_init, opacity_end, opacity_CS
 use MOM_opacity,             only : absorbRemainingSW, optics_type, optics_nbands
 use MOM_open_boundary,       only : ocean_OBC_type
-use MOM_otec,                only : interior_mass_sink, otec_init, otec_CS
+use MOM_otec,                only : otec_step, otec_init, otec_CS
 use MOM_regularize_layers,   only : regularize_layers, regularize_layers_init, regularize_layers_CS
 use MOM_set_diffusivity,     only : set_diffusivity, set_BBL_TKE
 use MOM_set_diffusivity,     only : set_diffusivity_init, set_diffusivity_end
@@ -587,7 +587,8 @@ subroutine diabatic_ALE_legacy(u, v, h, tv, Hml, fluxes, visc, ADp, CDp, dt, Tim
   endif
 
   if (CS%use_otec) then
-    call interior_mass_sink(h, tv, dt, G, GV, US, CS%otec, halo=CS%halo_TS_diff)
+    print *, "Using OTEC"
+    call otec_step(h, tv, dt, G, GV, US, CS%otec, halo=CS%halo_TS_diff)
   endif
 
   ! Whenever thickness changes let the diag manager know, target grids
@@ -1722,7 +1723,7 @@ subroutine layered_diabatic(u, v, h, tv, Hml, fluxes, visc, ADp, CDp, dt, Time_e
   endif
 
   ! OTEC !
-  ! if (CS%use_otec) call interior_mass_sink(h, tv, dt, G, GV, US, CS%otec, halo=CS%halo_TS_diff)
+  ! if (CS%use_otec) call otec_intake(h, tv, dt, G, GV, US, CS%otec, halo=CS%halo_TS_diff)
 
   ! Whenever thickness changes let the diag manager know, target grids
   ! for vertical remapping may need to be regenerated.
