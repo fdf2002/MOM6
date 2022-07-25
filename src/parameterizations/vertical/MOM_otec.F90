@@ -45,11 +45,11 @@ type, private :: thermo_var_1d
   ! If allocated, the following variables have nz layers.
   real, pointer :: T(:) => NULL() !< Potential temperature [degC].
   real, pointer :: S(:) => NULL() !< Salinity [PSU] or [gSalt/kg], generically [ppt].
-  real, pointer :: p_surf => NULL() !< Ocean surface pressure used in equation of state
-                                    !! calculations [R L2 T-2 ~> Pa]
+  real          :: p_surf = 0.0 !< Ocean surface pressure used in equation of state
+                                !! calculations [R L2 T-2 ~> Pa]
+
   type(EOS_type), pointer :: eqn_of_state => NULL() !< Type that indicates the
                                                     !! equation of state to use.
-
   real :: C_p            !<   The heat capacity of seawater [Q degC-1 ~> J degC-1 kg-1].
                          !! When conservative temperature is used, this is
                          !! constant and exactly 3991.86795711963 J degC-1 kg-1.
@@ -119,11 +119,11 @@ subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
 
     call calculate_density(tv1d%T(k), tv1d%S(k), pressure, rho, tv1d%eqn_of_state)
     ! Net out tracers will be per area, i.e. [kg m-2].
-    m = rho*dh
+    m = -rho*dh
 
     netMassOut = netMassOut + m
-    netHeatOut = netHeatOut + m * tv1d%C_p * tv1d%T(k)
     netSaltOut = netSaltOut + m*tv1d%S(k)
+    netHeatOut = netHeatOut + m * tv1d%C_p * tv1d%T(k)
 
     ! Increment for the next iteration
     k = k + 1
@@ -186,7 +186,7 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
   type(thermo_var_1d) :: tv1d !< 1-dimensional copy of thermodynamic fields
 
   tv1d%C_p = tv%C_p
-  tv1d%eqn_of_state = tv%eqn_of_state
+  tv1d%eqn_of_state => tv%eqn_of_state
   tv1d%T => T1d
   tv1d%S => S1d
 
@@ -208,6 +208,8 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
 
   do j=js,je
     do i=is,ie
+
+      tv1d%p_surf = tv%p_surf(i,j)
       ! Copy this column into a 1D array (for runtime efficiency)
       do k=1,GV%ke
         h1d(k) = h(i,j,k)
