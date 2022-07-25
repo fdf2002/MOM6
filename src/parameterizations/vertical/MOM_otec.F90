@@ -14,6 +14,7 @@ use MOM_unit_scaling,  only : unit_scale_type
 use MOM_variables,     only : thermo_var_ptrs
 use MOM_verticalGrid,  only : verticalGrid_type, get_thickness_units
 use MOM_EOS,           only : calculate_density, calculate_density_derivs
+use MOM_EOS,           only : EOS_type
 
 implicit none ; private
 
@@ -38,48 +39,72 @@ type, public :: otec_CS ; private
 
 end type otec_CS
 
+!> Control structure that stores some variables from thermo_var_ptrs,
+!! but only for a single grid cell, so as to make column calculations more efficient.
+type, private :: thermo_var_1d
+  ! If allocated, the following variables have nz layers.
+  real, pointer :: T(:) => NULL() !< Potential temperature [degC].
+  real, pointer :: S(:) => NULL() !< Salinity [PSU] or [gSalt/kg], generically [ppt].
+  real, pointer :: p_surf => NULL() !< Ocean surface pressure used in equation of state
+                                    !! calculations [R L2 T-2 ~> Pa]
+  type(EOS_type), pointer :: eqn_of_state => NULL() !< Type that indicates the
+                                                    !! equation of state to use.
+
+  real :: C_p            !<   The heat capacity of seawater [Q degC-1 ~> J degC-1 kg-1].
+                         !! When conservative temperature is used, this is
+                         !! constant and exactly 3991.86795711963 J degC-1 kg-1.
+
+end type thermo_var_1d
+
 contains
 
 !> Drains the layer at a cell, starting at a minimum depth of z.
 !! If this depletes the layer fully, then uses layer k+1 to finish draining.
 !! Upon depleting the deepest layer, stops with a NOTE in stdout.
 !! If dThickness < 0 after returning, that amount was unable to be removed.
-subroutine mass_sink(h1d, tv, GV, sink_depth, dThickness, netMassOut, netSaltOut, netHeatOut)
+subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
+                                    netMassOut, netSaltOut, netHeatOut)
   type(verticalGrid_type),   intent(in)    :: GV !< The ocean's vertical grid structure.
+
+  ! 1-dimensional copies of arrays from a thermo_vars_ptr object.
   real, dimension(SZK_(GV)), intent(inout) :: h1d !< Layer thicknesses at the grid cell [H ~> m or kg m-2]
-  type(thermo_var_ptrs),     intent(inout) :: tv !< A structure containing pointers
-                                                 !! to any available thermodynamic fields.
+  type(thermo_var_1d),       intent(in)    :: tv1d !< 1-dimensional copies of S and T
+
+  ! Mass Sink Parameters
   real,                      intent(in)    :: sink_depth !< The depth of this mass sink [H ~> m or kg m-2].
   real,                      intent(inout) :: dThickness !< Amount to change layer thickness [H ~> m or kg m-2]
-                                                         !! Must be negative.
-  real, optional,            intent(out)   :: netMassOut !< The total MASS being extracted [kg].
-  real, optional,            intent(out)   :: netSaltOut !< The total amount of salt being extracted
+                                                         !! Must be negative at the start of the subroutine.
+  real,                      intent(out)   :: netMassOut !< The total mass being extracted per unit area [kg m-2].
+  real,                      intent(out)   :: netSaltOut !< The total amount of salt being extracted
                                                          !! [ppt H ~> ppt m or ppt kg m-2].
-  real, optional,            intent(out)   :: netHeatOut !< The total heat being extracted
-                                                         !! [degC H ~> degC m or degC kg m-2].
+  real,                      intent(out)   :: netHeatOut !< The total heat being extracted [degC kg].
 
   integer :: k
-  real    :: layer_depth ! Bottom of the current layer
-  real    :: dh, maximum_drainage
+  real    :: layer_depth, dh, m, maximum_drainage, pressure, rho
 
-  k = GV%ke + 1
-  layer_depth = 0.0
+  k = 0
+  layer_depth = 0.0 ! Bottom of the current layer
 
-  print *, "there are", GV%ke, "layers. sink_depth=", sink_depth, ". layer_depth=", layer_depth
+  netMassOut = 0.0
+  netSaltOut = 0.0
+  netHeatOut = 0.0
+
+  pressure = tv1d%p_surf + GV%H_to_RZ * GV%g_Earth * sink_depth
+
+  !print *, "there are", GV%ke, "layers. sink_depth=", sink_depth, ". layer_depth=", layer_depth
 
   ! Iterate to find the appropriate layer to drain from
   do while (layer_depth <= sink_depth)
-    k = k - 1
+    k = k + 1
     print *, "Layer", k, "of", GV%ke
-    if (k < 1) then ! ocean is not deep enough
+    if (k > GV%ke) then ! ocean is not deep enough
       call MOM_error(WARNING, "MOM_otec: Ocean floor reached before intake.")
       return
     endif
     layer_depth = layer_depth + h1d(k)
-    !print *, "Checking next layer"
   enddo
 
-  !print *, "Layer found."
+  ! When layer depth
 
   do while (dThickness < 0) ! as long as there is still more to take out
 
@@ -92,11 +117,19 @@ subroutine mass_sink(h1d, tv, GV, sink_depth, dThickness, netMassOut, netSaltOut
     dThickness = dThickness - dh
     layer_depth = layer_depth - dh ! Layer bottom has moved up
 
+    call calculate_density(tv1d%T(k), tv1d%S(k), pressure, rho, tv1d%eqn_of_state)
+    ! Net out tracers will be per area, i.e. [kg m-2].
+    m = rho*dh
+
+    netMassOut = netMassOut + m
+    netHeatOut = netHeatOut + m * tv1d%C_p * tv1d%T(k)
+    netSaltOut = netSaltOut + m*tv1d%S(k)
+
     ! Increment for the next iteration
-    k = k - 1
+    k = k + 1
 
     ! If ocean bottom is reached
-    if (k < 1) then
+    if (k > GV%ke) then
       call MOM_error(WARNING, "MOM_otec: Ocean floor reached during intake.")
       return
     endif
@@ -111,6 +144,23 @@ end subroutine mass_sink
 !subroutine vertical_pipe(h, tv, dt, G, GV, US, CS, halo, i, j, z_in, z_out)
 
 !end subroutine vertical_pipe
+
+subroutine mass_source(h1d, tv1d, GV, src_depth, netMassIn, netSaltIn, netHeatIn)
+  type(verticalGrid_type),   intent(in)    :: GV !< The ocean's vertical grid structure.
+  real, dimension(SZK_(GV)), intent(inout) :: h1d !< Layer thicknesses at the grid cell [H ~> m or kg m-2]
+  type(thermo_var_1d),       intent(in)    :: tv1d !< A structure containing pointers
+                                                 !! to any available thermodynamic fields.
+  real,                      intent(in)    :: src_depth !< The depth of this mass sink [H ~> m or kg m-2].
+  real, optional,            intent(in)    :: netMassIn !< The total MASS being added per unit area [kg m-2].
+  real, optional,            intent(in)    :: netSaltIn !< The total amount of salt being added with the water
+                                                         !! [ppt H ~> ppt m or ppt kg m-2].
+  real, optional,            intent(in)    :: netHeatIn !< The total heat content of the water being added [degC kg].
+
+
+  !call calculate_density(tv1d%T(k), tv%S(k), p_ref_cv, Rcv_ml(:,j), &
+                               !tv%eqn_of_state, EOSdom)
+
+end subroutine mass_source
 
 !> Applies two mass sinks in every lateral grid cell.
 !! Add description here.
@@ -129,10 +179,16 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
   ! Local variables
 
   integer :: i, j, k, is, ie, js, je, nz, k2
-  !integer :: isj, iej, num_left, nkmb, k_tgt
   real :: dh_cold, dh_warm
-  real :: netMassOut, netSaltOut, netHeatOut ! TEMPORARY VARIABLES
-  real, dimension(SZK_(GV)) :: h1d ! A 1-dimensional copy of h in a given grid cell.
+  real :: massTransport, saltTransport, heatTransport
+  real, dimension(SZK_(GV)) :: h1d
+  real, dimension(SZK_(GV)), target :: T1d, S1d
+  type(thermo_var_1d) :: tv1d !< 1-dimensional copy of thermodynamic fields
+
+  tv1d%C_p = tv%C_p
+  tv1d%eqn_of_state = tv%eqn_of_state
+  tv1d%T => T1d
+  tv1d%S => S1d
 
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
   if (present(halo)) then
@@ -141,6 +197,10 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
 
   if (.not. CS%initialized) call MOM_error(FATAL, "MOM_otec: "//&
          "Module must be initialized before it is used.")
+
+  do k=1,GV%ke
+    print *, "thickness of layer",k, "=",h(2,2,k)
+  enddo
   
   if (.not.CS%apply_otec) return
 
@@ -151,17 +211,24 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
       ! Copy this column into a 1D array (for runtime efficiency)
       do k=1,GV%ke
         h1d(k) = h(i,j,k)
-        print *, "thickness of layer", k, "=", h1d(k)
+        T1d(k) = tv%T(i,j,k)
+        S1d(k) = tv%S(i,j,k)
+        !print *, "thickness of layer", k, "=", h1d(k)
       enddo
 
       ! Remove warm water from the surface layer
       dh_cold = -CS%w_cw * dt
       dh_warm = -CS%w_ww * dt
-      call mass_sink(h1d, tv, GV, CS%depth_cold, dh_cold)
-      call mass_sink(h1d, tv, GV, CS%depth_warm, dh_warm)
+      call mass_sink(h1d, tv1d, GV, CS%depth_cold, dh_cold, &
+                      massTransport, saltTransport, heatTransport)
+      print *, "m=",massTransport, " salt=",saltTransport, " heat=",heatTransport
+      !call mass_sink(h1d, tv1d, GV, CS%depth_warm, dh_warm)
 
+      ! Copy the 1D working arrays back into the originals
       do k=1,GV%ke
         h(i,j,k) = h1d(k)
+        tv%T(i,j,k) = T1d(k)
+        tv%S(i,j,k) = S1d(k)
       enddo
     enddo ! i-loop
   enddo ! j-loop
@@ -213,11 +280,11 @@ subroutine otec_init(Time, G, GV, US, param_file, diag, CS)
 
   CS%w_cw = w_cw
   CS%w_ww = gamma*w_cw
+
   CS%depth_cold = depth_cold
   CS%depth_warm = depth_warm
-  CS%apply_otec = .not.(w_cw == 0.0)
-  if (.not.CS%apply_otec) return
 
+  CS%apply_otec = .not.(w_cw == 0.0)
 
 end subroutine otec_init
 
