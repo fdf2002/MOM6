@@ -31,7 +31,7 @@ type, public :: otec_CS ; private
   real    :: w_cw !< Cold-water pumping rate [Z T-1 ~> m s-1]
   real    :: w_ww !< Warm-water pumping rate [Z T-1 ~> m s-1]
 
-  real    :: depth_cold, depth_warm !< Intake depths [m]
+  real    :: depth_cold, depth_warm, depth_out !< Pipe depths [m]
   
 
   type(time_type), pointer :: Time => NULL() !< A pointer to the ocean model's clock
@@ -58,6 +58,27 @@ end type thermo_var_1d
 
 contains
 
+!> Given a depth, finds the appropriate layer that contains that depth.
+subroutine find_layer(h1d, GV, target_depth, k, layer_depth)
+  type(verticalGrid_type),   intent(in)  :: GV !< The ocean's vertical grid structure.
+  real, dimension(SZK_(GV)), intent(in)  :: h1d !< Layer thicknesses at the grid cell [H ~> m or kg m-2].
+  real,                      intent(in)  :: target_depth !< The depth we are searching for [H ~> m or kg m-2].
+
+  integer, intent(out) :: k !< The layer corresponding to a depth of target_depth.
+                            !! If k > GV%ke, then the depth does not exist at this location.
+  real,    intent(out) :: layer_depth !< The depth of layer k [H ~> m or kg m-2].
+
+  k = 0
+  layer_depth = 0.0
+
+  do while (layer_depth <= target_depth)
+    k = k + 1
+    if (k > GV%ke) return ! ocean is not deep enough
+    layer_depth = layer_depth + h1d(k)
+  enddo
+
+end subroutine find_layer
+
 !> Drains the layer at a cell, starting at a minimum depth of z.
 !! If this depletes the layer fully, then uses layer k+1 to finish draining.
 !! Upon depleting the deepest layer, stops with a NOTE in stdout.
@@ -74,21 +95,19 @@ subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
   real,                      intent(in)    :: sink_depth !< The depth of this mass sink [H ~> m or kg m-2].
   real,                      intent(inout) :: dThickness !< Amount to change layer thickness [H ~> m or kg m-2]
                                                          !! Must be negative at the start of the subroutine.
-  real,                      intent(out)   :: netMassOut !< The total mass being extracted per unit area [kg m-2].
-  real,                      intent(out)   :: netSaltOut !< The total amount of salt being extracted
+  real,                      intent(inout) :: netMassOut !< The total mass being extracted per unit area [kg m-2].
+  real,                      intent(inout) :: netSaltOut !< The total amount of salt being extracted
                                                          !! [ppt H ~> ppt m or ppt kg m-2].
-  real,                      intent(out)   :: netHeatOut !< The total heat being extracted [degC kg].
+  real,                      intent(inout) :: netHeatOut !< The total heat being extracted [degC kg].
 
   integer :: k
   real    :: layer_depth, dh, m, maximum_drainage, pressure, rho
 
-  k = 0
-  layer_depth = 0.0 ! Bottom of the current layer
-
-  netMassOut = 0.0
-  netSaltOut = 0.0
-  netHeatOut = 0.0
-
+  call find_layer(h1d, GV, sink_depth, k, layer_depth)
+  if (k > GV%ke) then
+    call MOM_error(WARNING, "MOM_otec: Ocean floor reached before intake.")
+    return
+  endif
   pressure = tv1d%p_surf + GV%H_to_RZ * GV%g_Earth * sink_depth
 
   !print *, "there are", GV%ke, "layers. sink_depth=", sink_depth, ". layer_depth=", layer_depth
@@ -96,7 +115,7 @@ subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
   ! Iterate to find the appropriate layer to drain from
   do while (layer_depth <= sink_depth)
     k = k + 1
-    print *, "Layer", k, "of", GV%ke
+    !print *, "Layer", k, "of", GV%ke
     if (k > GV%ke) then ! ocean is not deep enough
       call MOM_error(WARNING, "MOM_otec: Ocean floor reached before intake.")
       return
@@ -140,10 +159,7 @@ subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
 
 end subroutine mass_sink
 
-!> ...
-!subroutine vertical_pipe(h, tv, dt, G, GV, US, CS, halo, i, j, z_in, z_out)
 
-!end subroutine vertical_pipe
 
 subroutine mass_source(h1d, tv1d, GV, src_depth, netMassIn, netSaltIn, netHeatIn)
   type(verticalGrid_type),   intent(in)    :: GV !< The ocean's vertical grid structure.
@@ -156,9 +172,27 @@ subroutine mass_source(h1d, tv1d, GV, src_depth, netMassIn, netSaltIn, netHeatIn
                                                          !! [ppt H ~> ppt m or ppt kg m-2].
   real, optional,            intent(in)    :: netHeatIn !< The total heat content of the water being added [degC kg].
 
+  ! Local variables
+  integer :: k
+  real :: layer_depth, p_init, rho, iRho
 
-  !call calculate_density(tv1d%T(k), tv%S(k), p_ref_cv, Rcv_ml(:,j), &
-                               !tv%eqn_of_state, EOSdom)
+  k = 0
+  layer_depth = 0.0
+
+  call find_layer(h1d, GV, src_depth, k, layer_depth)
+  if (k > GV%ke) then
+    call MOM_error(WARNING, "MOM_otec: Ocean floor reached before returning water.")
+    return
+  endif
+
+  ! Since adding water changes pressure below it, we might insert water incrementally.
+  p_init = tv1d%p_surf + GV%H_to_RZ * GV%g_Earth * src_depth
+  call calculate_density(tv1d%T(k), tv1d%S(k), p_init, rho, tv1d%eqn_of_state)
+  iRho = 1./rho ! The inverse of density.
+
+  ! Update mass and tracers.
+  h1d(k) = h1d(k) + netMassIn*iRho
+  !tv1d%S(k) = tv1d%S(k) +
 
 end subroutine mass_source
 
@@ -199,12 +233,12 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
          "Module must be initialized before it is used.")
 
   do k=1,GV%ke
-    print *, "thickness of layer",k, "=",h(2,2,k)
+    !print *, "thickness of layer",k, "=",h(2,2,k)
   enddo
   
   if (.not.CS%apply_otec) return
 
-  print *, "OTEC is initialized"
+  !print *, "OTEC is initialized"
 
   do j=js,je
     do i=is,ie
@@ -218,13 +252,22 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
         !print *, "thickness of layer", k, "=", h1d(k)
       enddo
 
+      ! Prepare tracers to be moved between layers
+      massTransport = 0.0
+      saltTransport = 0.0
+      heatTransport = 0.0
+
       ! Remove warm water from the surface layer
       dh_cold = -CS%w_cw * dt
       dh_warm = -CS%w_ww * dt
+
       call mass_sink(h1d, tv1d, GV, CS%depth_cold, dh_cold, &
                       massTransport, saltTransport, heatTransport)
-      print *, "m=",massTransport, " salt=",saltTransport, " heat=",heatTransport
-      !call mass_sink(h1d, tv1d, GV, CS%depth_warm, dh_warm)
+      !print *, "m=",massTransport, " salt=",saltTransport, " heat=",heatTransport
+      call mass_sink(h1d, tv1d, GV, CS%depth_warm, dh_warm, &
+                      massTransport, saltTransport, heatTransport)
+      call mass_source(h1d, tv1d, GV, CS%depth_out, &
+                        massTransport, saltTransport, heatTransport)
 
       ! Copy the 1D working arrays back into the originals
       do k=1,GV%ke
@@ -256,7 +299,7 @@ subroutine otec_init(Time, G, GV, US, param_file, diag, CS)
   character(len=200) :: inputdir, otec_file, filename, otec_var
   real :: w_cw  ! A uniform pumping rate [Z T-1 ~> m s-1]
   real :: gamma ! Ratio of warm- to cold-water pumping rate
-  real :: depth_cold, depth_warm ! Depth of the intakes [m]
+  real :: depth_cold, depth_warm, depth_out ! Depths of the pipes [m]
   integer :: i, j, isd, ied, jsd, jed, id
   isd = G%isd ; ied = G%ied ; jsd = G%jsd ; jed = G%jed
 
@@ -279,12 +322,16 @@ subroutine otec_init(Time, G, GV, US, param_file, diag, CS)
   call get_param(param_file, mdl, "OTEC_WARM_DEPTH", depth_warm, &
                   "The depth of the warm-water intake for OTEC.", &
                   units="m", default=20.0)
+  call get_param(param_file, mdl, "OTEC_OUT_DEPTH", depth_out, &
+                  "The depth of the mixed-water output for OTEC.", &
+                  units="m", default=500.0)
 
   CS%w_cw = w_cw
   CS%w_ww = gamma*w_cw
 
   CS%depth_cold = depth_cold
   CS%depth_warm = depth_warm
+  CS%depth_out  = depth_out
 
   CS%apply_otec = .not.(w_cw == 0.0)
 
