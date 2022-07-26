@@ -81,8 +81,7 @@ end subroutine find_layer
 
 !> Drains the layer at a cell, starting at a minimum depth of z.
 !! If this depletes the layer fully, then uses layer k+1 to finish draining.
-!! Upon depleting the deepest layer, stops with a NOTE in stdout.
-!! If dThickness < 0 after returning, that amount was unable to be removed.
+!! Upon depleting the deepest layer, stops with a warning in stdout.
 subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
                                     netMassOut, netSaltOut, netHeatOut)
   type(verticalGrid_type),   intent(in)    :: GV !< The ocean's vertical grid structure.
@@ -95,13 +94,14 @@ subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
   real,                      intent(in)    :: sink_depth !< The depth of this mass sink [H ~> m or kg m-2].
   real,                      intent(inout) :: dThickness !< Amount to change layer thickness [H ~> m or kg m-2]
                                                          !! Must be negative at the start of the subroutine.
+                                                         !! Upon returning, dThickness is the actual change in thickness.
   real,                      intent(inout) :: netMassOut !< The total mass being extracted per unit area [kg m-2].
   real,                      intent(inout) :: netSaltOut !< The total amount of salt being extracted
                                                          !! [ppt H ~> ppt m or ppt kg m-2].
-  real,                      intent(inout) :: netHeatOut !< The total heat being extracted [degC kg].
+  real,                      intent(inout) :: netHeatOut !< The total heat being extracted [degC H ~> degC m or degC kg m-2].
 
   integer :: k
-  real    :: layer_depth, dh, m, maximum_drainage, pressure, rho
+  real    :: layer_depth, dh, m, maximum_drainage, pressure, rho, dh_total
 
   call find_layer(h1d, GV, sink_depth, k, layer_depth)
   if (k > GV%ke) then
@@ -110,30 +110,16 @@ subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
   endif
   pressure = tv1d%p_surf + GV%H_to_RZ * GV%g_Earth * sink_depth
 
-  !print *, "there are", GV%ke, "layers. sink_depth=", sink_depth, ". layer_depth=", layer_depth
-
-  ! Iterate to find the appropriate layer to drain from
-  do while (layer_depth <= sink_depth)
-    k = k + 1
-    !print *, "Layer", k, "of", GV%ke
-    if (k > GV%ke) then ! ocean is not deep enough
-      call MOM_error(WARNING, "MOM_otec: Ocean floor reached before intake.")
-      return
-    endif
-    layer_depth = layer_depth + h1d(k)
-  enddo
-
-  ! When layer depth
-
-  do while (dThickness < 0) ! as long as there is still more to take out
+  dh_total = dThickness
+  do while (dh_total < 0) ! as long as there is still more to take out
 
     ! The maximum drainage from this layer is everything below sink_depth.
     ! Ensure the layer thickness is always at least Angstrom.
     maximum_drainage = min(h1d(k) - GV%Angstrom_H, layer_depth - sink_depth)
     ! Drain as much as specified by input, or until the layer vanishes.
-    dh = max(dThickness, -maximum_drainage)
+    dh = max(dh_total, -maximum_drainage)
     h1d(k) = max(GV%Angstrom_H, h1d(k) + dh)
-    dThickness = dThickness - dh
+    dh_total = dh_total - dh
     layer_depth = layer_depth - dh ! Layer bottom has moved up
 
     call calculate_density(tv1d%T(k), tv1d%S(k), pressure, rho, tv1d%eqn_of_state)
@@ -142,7 +128,7 @@ subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
 
     netMassOut = netMassOut + m
     netSaltOut = netSaltOut + m*tv1d%S(k)
-    netHeatOut = netHeatOut + m * tv1d%C_p * tv1d%T(k)
+    netHeatOut = netHeatOut + m*tv1d%T(k)
 
     ! Increment for the next iteration
     k = k + 1
@@ -157,42 +143,62 @@ subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
 
   enddo
 
+  ! Update dThickness to reflect actual amount removed
+  dThickness = min(dThickness-dh_total, -GV%H_subroundoff)
+
 end subroutine mass_sink
 
 
 
-subroutine mass_source(h1d, tv1d, GV, src_depth, netMassIn, netSaltIn, netHeatIn)
+subroutine mass_source(h1d, tv1d, GV, src_depth, dThickness, netMassIn, netSaltIn, netHeatIn)
   type(verticalGrid_type),   intent(in)    :: GV !< The ocean's vertical grid structure.
   real, dimension(SZK_(GV)), intent(inout) :: h1d !< Layer thicknesses at the grid cell [H ~> m or kg m-2]
   type(thermo_var_1d),       intent(in)    :: tv1d !< A structure containing pointers
                                                  !! to any available thermodynamic fields.
+
   real,                      intent(in)    :: src_depth !< The depth of this mass sink [H ~> m or kg m-2].
+  real,                      intent(in)    :: dThickness !< The change in layer thickness [H ~> m or kg m-2].
+
   real, optional,            intent(in)    :: netMassIn !< The total MASS being added per unit area [kg m-2].
   real, optional,            intent(in)    :: netSaltIn !< The total amount of salt being added with the water
-                                                         !! [ppt H ~> ppt m or ppt kg m-2].
-  real, optional,            intent(in)    :: netHeatIn !< The total heat content of the water being added [degC kg].
+                                                        !! [ppt H ~> ppt m or ppt kg m-2].
+  real, optional,            intent(in)    :: netHeatIn !< The total heat content of the water being added
+                                                        !! [degC H ~> degC m or degC kg m-2].
 
   ! Local variables
   integer :: k
-  real :: layer_depth, p_init, rho, iRho
+  real :: layer_depth, &
+          iMassIn, & ! Inverse of the mass being added
+          T_add, S_add, p_add, rho_add, iRho_add, & ! Properties of the water being added.
+          p_k, rho_k, iRho_k, oldMass, & ! Properties of the layer before water is added.
+          iNewMass ! Inverse of total mass after injection [m2 kg-1].
 
-  k = 0
-  layer_depth = 0.0
-
+  k = 0; layer_depth = 0.0
   call find_layer(h1d, GV, src_depth, k, layer_depth)
   if (k > GV%ke) then
     call MOM_error(WARNING, "MOM_otec: Ocean floor reached before returning water.")
     return
   endif
+  
+  iMassIn = 1./netMassIn
+  ! Find pressure and density of the water being added.
+  T_add = netHeatIn * iMassIn
+  S_add = netSaltIn * iMassIn
+  p_add = tv1d%p_surf + GV%H_to_RZ * GV%g_Earth * src_depth
+  call calculate_density(T_add, S_add, p_add, rho_add, tv1d%eqn_of_state)
+  iRho_add = 1./rho_add ! The inverse of density [m3 kg-1]
 
-  ! Since adding water changes pressure below it, we might insert water incrementally.
-  p_init = tv1d%p_surf + GV%H_to_RZ * GV%g_Earth * src_depth
-  call calculate_density(tv1d%T(k), tv1d%S(k), p_init, rho, tv1d%eqn_of_state)
-  iRho = 1./rho ! The inverse of density.
+  ! Now find average pressure & density for the layer as a whole.
+  p_k = tv1d%p_surf + GV%H_to_RZ*GV%g_Earth * (layer_depth - 0.5*h1d(k))
+  call calculate_density(tv1d%T(k), tv1d%S(k), p_k, rho_k, tv1d%eqn_of_state)
+  iRho_k = 1./rho_k
+  oldMass = rho_k*h1d(k)
+  iNewMass = 1./(oldMass + netMassIn)
 
-  ! Update mass and tracers.
-  h1d(k) = h1d(k) + netMassIn*iRho
-  !tv1d%S(k) = tv1d%S(k) +
+  ! Update mass and tracers of the layer.
+  h1d(k) = h1d(k) + dThickness
+  tv1d%S(k) = (oldMass*tv1d%S(k) + netSaltIn) * iNewMass
+  tv1d%T(k) = (oldMass*tv1d%T(k) + netHeatIn) * iNewMass
 
 end subroutine mass_source
 
@@ -213,7 +219,7 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
   ! Local variables
 
   integer :: i, j, k, is, ie, js, je, nz, k2
-  real :: dh_cold, dh_warm
+  real :: dh_cold, dh_warm, dh_mixed
   real :: massTransport, saltTransport, heatTransport
   real, dimension(SZK_(GV)) :: h1d
   real, dimension(SZK_(GV)), target :: T1d, S1d
@@ -266,7 +272,9 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
       !print *, "m=",massTransport, " salt=",saltTransport, " heat=",heatTransport
       call mass_sink(h1d, tv1d, GV, CS%depth_warm, dh_warm, &
                       massTransport, saltTransport, heatTransport)
-      call mass_source(h1d, tv1d, GV, CS%depth_out, &
+      ! We conserve thickness, not mass.
+      dh_mixed = -(dh_cold + dh_warm)
+      call mass_source(h1d, tv1d, GV, CS%depth_out, dh_mixed, &
                         massTransport, saltTransport, heatTransport)
 
       ! Copy the 1D working arrays back into the originals
