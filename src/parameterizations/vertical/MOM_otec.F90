@@ -39,21 +39,12 @@ type, public :: otec_CS ; private
 
 end type otec_CS
 
-!> Control structure that stores some variables from thermo_var_ptrs,
-!! but only for a single grid cell, so as to make column calculations more efficient.
+!> Control structure that stores temperature and salinity as 1-dimensional arrays
+!! for a single grid cell.
 type, private :: thermo_var_1d
   ! If allocated, the following variables have nz layers.
   real, pointer :: T(:) => NULL() !< Potential temperature [degC].
   real, pointer :: S(:) => NULL() !< Salinity [PSU] or [gSalt/kg], generically [ppt].
-  real          :: p_surf = 0.0 !< Ocean surface pressure used in equation of state
-                                !! calculations [R L2 T-2 ~> Pa]
-
-  type(EOS_type), pointer :: eqn_of_state => NULL() !< Type that indicates the
-                                                    !! equation of state to use.
-  real :: C_p            !<   The heat capacity of seawater [Q degC-1 ~> J degC-1 kg-1].
-                         !! When conservative temperature is used, this is
-                         !! constant and exactly 3991.86795711963 J degC-1 kg-1.
-
 end type thermo_var_1d
 
 contains
@@ -92,25 +83,24 @@ subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
 
   ! Mass Sink Parameters
   real,                      intent(in)    :: sink_depth !< The depth of this mass sink [H ~> m or kg m-2].
-  real,                      intent(inout) :: dThickness !< Amount to change layer thickness [H ~> m or kg m-2]
-                                                         !! Must be negative at the start of the subroutine.
-                                                         !! Upon returning, dThickness is the actual change in thickness.
-  real,                      intent(inout) :: netMassOut !< The total mass being extracted per unit area [kg m-2].
+  real,                      intent(in)    :: dThickness !< Amount to change layer thickness [H ~> m or kg m-2]
+                                                         !! Must be negative.
+  real,                      intent(inout) :: netMassOut !< The total mass being extracted [H ~> m or kg m-2].
   real,                      intent(inout) :: netSaltOut !< The total amount of salt being extracted
                                                          !! [ppt H ~> ppt m or ppt kg m-2].
   real,                      intent(inout) :: netHeatOut !< The total heat being extracted [degC H ~> degC m or degC kg m-2].
 
   integer :: k
-  real    :: layer_depth, dh, m, maximum_drainage, pressure, rho, dh_total
+  real    :: layer_depth, dh, maximum_drainage, dh_total
 
   call find_layer(h1d, GV, sink_depth, k, layer_depth)
   if (k > GV%ke) then
     call MOM_error(WARNING, "MOM_otec: Ocean floor reached before intake.")
     return
   endif
-  pressure = tv1d%p_surf + GV%H_to_RZ * GV%g_Earth * sink_depth
 
   dh_total = dThickness
+
   do while (dh_total < 0) ! as long as there is still more to take out
 
     ! The maximum drainage from this layer is everything below sink_depth.
@@ -122,19 +112,14 @@ subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
     dh_total = dh_total - dh
     layer_depth = layer_depth - dh ! Layer bottom has moved up
 
-    call calculate_density(tv1d%T(k), tv1d%S(k), pressure, rho, tv1d%eqn_of_state)
-    ! Net out tracers will be per area, i.e. [kg m-2].
-    m = -rho*dh
-
-    netMassOut = netMassOut + m
-    netSaltOut = netSaltOut + m*tv1d%S(k)
-    netHeatOut = netHeatOut + m*tv1d%T(k)
+    ! Update tracers for output
+    netMassOut = netMassOut - dh
+    netSaltOut = netSaltOut - dh*tv1d%S(k)
+    netHeatOut = netHeatOut - dh*tv1d%T(k)
 
     ! Increment for the next iteration
     k = k + 1
-
-    ! If ocean bottom is reached
-    if (k > GV%ke) then
+    if (k > GV%ke) then ! ocean bottom is reached
       call MOM_error(WARNING, "MOM_otec: Ocean floor reached during intake.")
       return
     endif
@@ -143,23 +128,19 @@ subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
 
   enddo
 
-  ! Update dThickness to reflect actual amount removed
-  dThickness = min(dThickness-dh_total, -GV%H_subroundoff)
-
 end subroutine mass_sink
 
 
 
-subroutine mass_source(h1d, tv1d, GV, src_depth, dThickness, netMassIn, netSaltIn, netHeatIn)
+subroutine mass_source(h1d, tv1d, GV, src_depth, netMassIn, netSaltIn, netHeatIn)
   type(verticalGrid_type),   intent(in)    :: GV !< The ocean's vertical grid structure.
   real, dimension(SZK_(GV)), intent(inout) :: h1d !< Layer thicknesses at the grid cell [H ~> m or kg m-2]
   type(thermo_var_1d),       intent(in)    :: tv1d !< A structure containing pointers
-                                                 !! to any available thermodynamic fields.
+                                                   !! to any available thermodynamic fields.
 
   real,                      intent(in)    :: src_depth !< The depth of this mass sink [H ~> m or kg m-2].
-  real,                      intent(in)    :: dThickness !< The change in layer thickness [H ~> m or kg m-2].
 
-  real, optional,            intent(in)    :: netMassIn !< The total MASS being added per unit area [kg m-2].
+  real, optional,            intent(in)    :: netMassIn !< The total mass being added per unit area [H ~> m or kg m-2].
   real, optional,            intent(in)    :: netSaltIn !< The total amount of salt being added with the water
                                                         !! [ppt H ~> ppt m or ppt kg m-2].
   real, optional,            intent(in)    :: netHeatIn !< The total heat content of the water being added
@@ -168,11 +149,9 @@ subroutine mass_source(h1d, tv1d, GV, src_depth, dThickness, netMassIn, netSaltI
   ! Local variables
   integer :: k
   real :: layer_depth, &
-          iMassIn, & ! Inverse of the mass being added
-          T_add, S_add, p_add, rho_add, iRho_add, & ! Properties of the water being added.
-          p_k, rho_k, iRho_k, oldMass, & ! Properties of the layer before water is added.
-          iNewMass ! Inverse of total mass after injection [m2 kg-1].
+          oldMass, iNewMass ! Inverse of total mass before/after injection [m2 kg-1].
 
+  ! Find the correct layer to insert.
   k = 0; layer_depth = 0.0
   call find_layer(h1d, GV, src_depth, k, layer_depth)
   if (k > GV%ke) then
@@ -180,23 +159,11 @@ subroutine mass_source(h1d, tv1d, GV, src_depth, dThickness, netMassIn, netSaltI
     return
   endif
   
-  iMassIn = 1./netMassIn
-  ! Find pressure and density of the water being added.
-  T_add = netHeatIn * iMassIn
-  S_add = netSaltIn * iMassIn
-  p_add = tv1d%p_surf + GV%H_to_RZ * GV%g_Earth * src_depth
-  call calculate_density(T_add, S_add, p_add, rho_add, tv1d%eqn_of_state)
-  iRho_add = 1./rho_add ! The inverse of density [m3 kg-1]
-
-  ! Now find average pressure & density for the layer as a whole.
-  p_k = tv1d%p_surf + GV%H_to_RZ*GV%g_Earth * (layer_depth - 0.5*h1d(k))
-  call calculate_density(tv1d%T(k), tv1d%S(k), p_k, rho_k, tv1d%eqn_of_state)
-  iRho_k = 1./rho_k
-  oldMass = rho_k*h1d(k)
-  iNewMass = 1./(oldMass + netMassIn)
-
+  oldMass = h1d(k)
   ! Update mass and tracers of the layer.
-  h1d(k) = h1d(k) + dThickness
+  h1d(k) = h1d(k) + netMassIn
+  iNewMass = 1./h1d(k)
+
   tv1d%S(k) = (oldMass*tv1d%S(k) + netSaltIn) * iNewMass
   tv1d%T(k) = (oldMass*tv1d%T(k) + netHeatIn) * iNewMass
 
@@ -219,14 +186,12 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
   ! Local variables
 
   integer :: i, j, k, is, ie, js, je, nz, k2
-  real :: dh_cold, dh_warm, dh_mixed
-  real :: massTransport, saltTransport, heatTransport
+  real :: dh_cold, dh_warm, & ! w_cw and w_ww applied over the timestep
+          dMass, dSalt, dHeat ! Tracers being mixed and moved
   real, dimension(SZK_(GV)) :: h1d
   real, dimension(SZK_(GV)), target :: T1d, S1d
   type(thermo_var_1d) :: tv1d !< 1-dimensional copy of thermodynamic fields
 
-  tv1d%C_p = tv%C_p
-  tv1d%eqn_of_state => tv%eqn_of_state
   tv1d%T => T1d
   tv1d%S => S1d
 
@@ -249,7 +214,6 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
   do j=js,je
     do i=is,ie
 
-      tv1d%p_surf = tv%p_surf(i,j)
       ! Copy this column into a 1D array (for runtime efficiency)
       do k=1,GV%ke
         h1d(k) = h(i,j,k)
@@ -259,23 +223,14 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
       enddo
 
       ! Prepare tracers to be moved between layers
-      massTransport = 0.0
-      saltTransport = 0.0
-      heatTransport = 0.0
-
-      ! Remove warm water from the surface layer
+      dMass = 0.0; dSalt = 0.0; dHeat = 0.0
       dh_cold = -CS%w_cw * dt
       dh_warm = -CS%w_ww * dt
 
-      call mass_sink(h1d, tv1d, GV, CS%depth_cold, dh_cold, &
-                      massTransport, saltTransport, heatTransport)
-      !print *, "m=",massTransport, " salt=",saltTransport, " heat=",heatTransport
-      call mass_sink(h1d, tv1d, GV, CS%depth_warm, dh_warm, &
-                      massTransport, saltTransport, heatTransport)
+      call mass_sink(h1d, tv1d, GV, CS%depth_cold, dh_cold, dMass, dSalt, dHeat)
+      call mass_sink(h1d, tv1d, GV, CS%depth_warm, dh_warm, dMass, dSalt, dHeat)
       ! We conserve thickness, not mass.
-      dh_mixed = -(dh_cold + dh_warm)
-      call mass_source(h1d, tv1d, GV, CS%depth_out, dh_mixed, &
-                        massTransport, saltTransport, heatTransport)
+      call mass_source(h1d, tv1d, GV, CS%depth_out, dMass, dSalt, dHeat)
 
       ! Copy the 1D working arrays back into the originals
       do k=1,GV%ke
