@@ -63,8 +63,9 @@ subroutine interior_mass_sink(h, tv, dt, G, GV, US, CS, halo)
   if (.not.CS%apply_otec) return
 
   do j=js,je
-    do i=isj,iej
-        ! Remove mass from layer k at a rate set by w_otec
+    do i=is,ie
+      ! Remove mass from layer k at a rate set by w_otec
+            
 
     enddo ! i-loop
   enddo ! j-loop
