@@ -70,7 +70,7 @@ subroutine find_layer(h1d, GV, target_depth, k, layer_depth)
 
 end subroutine find_layer
 
-!> Drains the layer at a cell, starting at a minimum depth of z.
+!> Drains the layer at a cell, starting at a minimum depth of sink_depth.
 !! If this depletes the layer fully, then uses layer k+1 to finish draining.
 !! Upon depleting the deepest layer, stops with a warning in stdout.
 subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
@@ -130,8 +130,7 @@ subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
 
 end subroutine mass_sink
 
-
-
+!> Adds the given mass, salt content, and heat content at the depth src_depth.
 subroutine mass_source(h1d, tv1d, GV, src_depth, netMassIn, netSaltIn, netHeatIn)
   type(verticalGrid_type),   intent(in)    :: GV !< The ocean's vertical grid structure.
   real, dimension(SZK_(GV)), intent(inout) :: h1d !< Layer thicknesses at the grid cell [H ~> m or kg m-2]
@@ -169,8 +168,8 @@ subroutine mass_source(h1d, tv1d, GV, src_depth, netMassIn, netSaltIn, netHeatIn
 
 end subroutine mass_source
 
-!> Applies two mass sinks in every lateral grid cell.
-!! Add description here.
+!> Applies OTEC for a single timestep.
+!! Specifically, applies two mass sinks, then mixes them and releases them at a mass source.
 subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
   type(ocean_grid_type),                     intent(inout) :: G  !< The ocean's grid structure.
   type(verticalGrid_type),                   intent(in)    :: GV !< The ocean's vertical grid structure.
