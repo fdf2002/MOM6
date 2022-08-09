@@ -131,7 +131,6 @@ subroutine mass_sink(h1d, tv1d, GV, sink_depth, dThickness, &
 end subroutine mass_sink
 
 
-
 subroutine mass_source(h1d, tv1d, GV, src_depth, netMassIn, netSaltIn, netHeatIn)
   type(verticalGrid_type),   intent(in)    :: GV !< The ocean's vertical grid structure.
   real, dimension(SZK_(GV)), intent(inout) :: h1d !< Layer thicknesses at the grid cell [H ~> m or kg m-2]
@@ -185,12 +184,19 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
   integer,                         optional, intent(in)    :: halo !< Halo width over which to work
   ! Local variables
 
-  integer :: i, j, k, is, ie, js, je, nz, k2
+  integer :: i, j, k, is, ie, js, je, nz, k2, k_warm, k_cold
   real :: dh_cold, dh_warm, & ! w_cw and w_ww applied over the timestep
-          dMass, dSalt, dHeat ! Tracers being mixed and moved
+          dMass, dSalt, dHeat, & ! Tracers being mixed and moved
+          layer_depth, depth_tot, deltaT ! For comparing stratification against threshold
   real, dimension(SZK_(GV)) :: h1d
   real, dimension(SZK_(GV)), target :: T1d, S1d
   type(thermo_var_1d) :: tv1d !< 1-dimensional copy of thermodynamic fields
+
+  k_warm = 0
+  k_cold = 0
+  deltaT = 0.0
+  layer_depth = 0.0
+  depth_tot = 0.0
 
   tv1d%T => T1d
   tv1d%S => S1d
@@ -203,16 +209,16 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
   if (.not. CS%initialized) call MOM_error(FATAL, "MOM_otec: "//&
          "Module must be initialized before it is used.")
 
-  do k=1,GV%ke
-    !print *, "thickness of layer",k, "=",h(2,2,k)
-  enddo
-  
   if (.not.CS%apply_otec) return
 
   !print *, "OTEC is initialized"
 
   do j=js,je
     do i=is,ie
+
+      ! Skip profile if ocean depth is deeper than cold intake
+      depth_tot = G%bathyT(i,j) + G%Z_ref
+      if (depth_tot < CS%depth_cold) cycle
 
       ! Copy this column into a 1D array (for runtime efficiency)
       do k=1,GV%ke
@@ -222,22 +228,31 @@ subroutine otec_step(h, tv, dt, G, GV, US, CS, halo)
         !print *, "thickness of layer", k, "=", h1d(k)
       enddo
 
-      ! Prepare tracers to be moved between layers
-      dMass = 0.0; dSalt = 0.0; dHeat = 0.0
-      dh_cold = -CS%w_cw * dt
-      dh_warm = -CS%w_ww * dt
+      ! Only continue if temperature difference is larger than 16ºC (net power production)
+      call find_layer(h1d, GV, CS%depth_warm, k_warm, layer_depth)
+      call find_layer(h1d, GV, CS%depth_cold, k_cold, layer_depth)
+      deltaT = T1d(k_warm) - T1d(k_cold)
 
-      call mass_sink(h1d, tv1d, GV, CS%depth_cold, dh_cold, dMass, dSalt, dHeat)
-      call mass_sink(h1d, tv1d, GV, CS%depth_warm, dh_warm, dMass, dSalt, dHeat)
-      ! We conserve thickness, not mass.
-      call mass_source(h1d, tv1d, GV, CS%depth_out, dMass, dSalt, dHeat)
+      if (deltaT > 16.0) then
+        ! Prepare tracers to be moved between layers
+        dMass = 0.0; dSalt = 0.0; dHeat = 0.0
+        dh_cold = -CS%w_cw * dt
+        dh_warm = -CS%w_ww * dt
 
-      ! Copy the 1D working arrays back into the originals
-      do k=1,GV%ke
-        h(i,j,k) = h1d(k)
-        tv%T(i,j,k) = T1d(k)
-        tv%S(i,j,k) = S1d(k)
-      enddo
+        call mass_sink(h1d, tv1d, GV, CS%depth_cold, dh_cold, dMass, dSalt, dHeat)
+        call mass_sink(h1d, tv1d, GV, CS%depth_warm, dh_warm, dMass, dSalt, dHeat)
+        ! We conserve thickness, not mass.
+        call mass_source(h1d, tv1d, GV, CS%depth_out, dMass, dSalt, dHeat)
+
+        ! Copy the 1D working arrays back into the originals
+        do k=1,GV%ke
+          h(i,j,k) = h1d(k)
+          tv%T(i,j,k) = T1d(k)
+          tv%S(i,j,k) = S1d(k)
+        enddo
+
+      endif
+
     enddo ! i-loop
   enddo ! j-loop
 
