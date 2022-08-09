@@ -587,7 +587,7 @@ subroutine diabatic_ALE_legacy(u, v, h, tv, Hml, fluxes, visc, ADp, CDp, dt, Tim
   endif
 
   if (CS%use_otec) then
-    print *, "Using OTEC"
+    !print *, "Using OTEC"
     call otec_step(h, tv, dt, G, GV, US, CS%otec, halo=CS%halo_TS_diff)
   endif
 
